@@ -38,6 +38,10 @@ import sys
 rtti_logger = 0
 fileHandler = 0
 RttiLogFile = os.path.realpath(__file__) + ".log"
+g_Is64bit = False
+g_pointer_size = 4
+
+g_deep_scan = False
 
 Map_BaseClassDescriptor			= {}
 Map_TypeDescriptor				= {}
@@ -47,9 +51,19 @@ Map_Vtable						= {}
 Map_Class						= {}
 Map_VbTable						= {}
 #_______________________________________________________________________________
-def Deref(addr) :
+def ReadPointer(addr) :
+	if g_Is64bit :
+		return Qword(addr)
+	else :
+		return Dword(addr)
+
+def ReadUint32(addr):
 	return Dword(addr)
 
+
+def ReadRva(addr):
+	return Dword(addr) + get_imagebase()
+	
 #_______________________________________________________________________________
 def IsDataSegment(addr) :
 	""" return True if addr is in a data segment """
@@ -73,12 +87,20 @@ class BaseClassDescritorObject:
 		if not IsDataSegment(addr) :
 			raise	RttiError("Not a BaseClassDescritor")
 		
-		self.addr								= addr
-		self.Address_TypeDescriptor				= Deref(addr +  0)
-		self.numContainedBases					= Deref(addr +  4)
-		self.PMD								= [Deref(addr + 8), Deref(addr +  12), Deref(addr +  16)]
-		self.Attributes							= Deref(addr +  20)
-		self.Address_ClassHierarchyDescriptor	= Deref(addr +  24)
+		if g_Is64bit :
+			self.addr								= addr
+			self.Address_TypeDescriptor				= ReadRva(addr +  0)
+			self.numContainedBases					= ReadUint32(addr +  4)
+			self.PMD								= [ReadUint32(addr + 8), ReadUint32(addr +  12), ReadUint32(addr +  16)]
+			self.Attributes							= ReadUint32(addr +  20)
+			self.Address_ClassHierarchyDescriptor	= ReadRva(addr +  24)
+		else :
+			self.addr								= addr
+			self.Address_TypeDescriptor				= ReadPointer(addr +  0)
+			self.numContainedBases					= ReadUint32(addr +  4)
+			self.PMD								= [ReadUint32(addr + 8), ReadUint32(addr +  12), ReadUint32(addr +  16)]
+			self.Attributes							= ReadUint32(addr +  20)
+			self.Address_ClassHierarchyDescriptor	= ReadPointer(addr +  24)
 	
 	def __str__(self):
 		str = "BaseClassDescritorObject(%x - %s)\n" % (self.addr, self.GetClassName());
@@ -141,10 +163,13 @@ class ClassHierarchyDescriptorObject:
 			
 		self.addr								=	addr
 		
-		self.Signature							=	Deref (addr +  0)
-		self.Attributes							=	Deref (addr +  4)
-		self.numBaseClasses						=	Deref (addr +  8)
-		self.Address_BaseClassDescriptorArray	=	Deref (addr + 12)
+		self.Signature							=	ReadUint32 (addr +  0)
+		self.Attributes							=	ReadUint32 (addr +  4)
+		self.numBaseClasses						=	ReadUint32 (addr +  8)
+		if g_Is64bit :
+			self.Address_BaseClassDescriptorArray	=	ReadRva (addr + 12)
+		else :
+			self.Address_BaseClassDescriptorArray	=	ReadPointer (addr + 12)
 		self.Name								=	name
 		
 		if (self.Signature != 0):
@@ -153,7 +178,10 @@ class ClassHierarchyDescriptorObject:
 	def GetBaseClassDescriptorArray(self) :
 		Array = []
 		for i in range(self.numBaseClasses) :
-			BaseClassDescriptorAddress = Deref(self.Address_BaseClassDescriptorArray + 4*i)
+			if g_Is64bit :
+				BaseClassDescriptorAddress = ReadRva(self.Address_BaseClassDescriptorArray + 4*i)
+			else:
+				BaseClassDescriptorAddress = ReadPointer(self.Address_BaseClassDescriptorArray + 4*i)
 			# strange, but some times there are duplicate values
 			if BaseClassDescriptorAddress not in Array :
 				Array += [BaseClassDescriptorAddress]
@@ -187,7 +215,14 @@ class ClassHierarchyDescriptorObject:
 		node	+=	"\"];\n"
 		
 		return (node, link, "ClassHierarchyDescriptorObject_%x" % self.addr, "BaseClassDescriptorArray_%x" % (self.Address_BaseClassDescriptorArray))
+
+def MyGetString(addr):
+	ret = ""
+	while Byte(addr) != 0:
+		ret += chr(Byte(addr))
+		addr += 1
 		
+	return ret
 #_______________________________________________________________________________			
 class TypeDescriptorObject:
 	def __init__(self, addr) :
@@ -195,14 +230,19 @@ class TypeDescriptorObject:
 		if not IsDataSegment(addr) :
 			raise	RttiError("Not a TypeDescriptor at address : %x" % (addr) )
 		self.addr			= addr
-		self.pVFTable		= Deref (addr + 0)
-		self.Name			= GetString(addr + 8)
+		self.pVFTable		= ReadPointer (addr + 0)
+		if g_Is64bit :
+			self.Name			= MyGetString(addr + 16)
+		else :
+			self.Name			= MyGetString(addr + 8)
 		self.Name			= self.Name.replace(".?AU", "")
 		self.Name			= self.Name.replace(".?AV", "")		
 		self.Name			= self.Name.replace("@@", "")
 		self.Name			= self.Name.replace("@", "_")
 		if self.Name == "" :
 			raise	RttiError("Not a TypeDescriptor" )
+			
+		rtti_logger.debug("Type Descriptor at '%x', name : '%s'" % (addr, self.Name))
 			
 	def GetClassName(self):
 		return self.Name
@@ -227,15 +267,23 @@ class CompleteObjectLocatorObject :
 			raise	RttiError("Not a CompleteObjectLocator Object" ) 
 		
 		self.addr								= addr
-		self.signature							= Deref(addr +  0) # offset  0
-		self.Offset								= Deref(addr +  4) # offset  4
-		self.cdOffset							= Deref(addr +  8) # offset  8
-		self.Address_TypeDescriptor				= Deref(addr + 12) # offset 12
-		self.Address_ClassHierarchyDescriptor	= Deref(addr + 16) # offset 16
+		self.signature							= ReadUint32(addr +  0) # offset  0
+		self.Offset								= ReadUint32(addr +  4) # offset  4
+		self.cdOffset							= ReadUint32(addr +  8) # offset  8
+		if g_Is64bit :
+			self.Address_TypeDescriptor				= ReadRva(addr + 12) # offset 12
+			self.Address_ClassHierarchyDescriptor	= ReadRva(addr + 16) # offset 16
+		else :
+			self.Address_TypeDescriptor				= ReadPointer(addr + 12) # offset 12
+			self.Address_ClassHierarchyDescriptor	= ReadPointer(addr + 16) # offset 16
 		self.Name								= 0
 		
-		if (self.signature != 0):
-			raise	RttiError("Not a CompleteObjectLocator Object" ) 
+		if g_Is64bit :
+			if (self.signature != 1):
+				raise	RttiError("Not a CompleteObjectLocator Object" ) 
+		else :
+			if (self.signature != 0):
+				raise	RttiError("Not a CompleteObjectLocator Object" ) 
 				
 	def GetTypeDescriptor(self) :
 		if self.Address_TypeDescriptor not in Map_TypeDescriptor :
@@ -285,7 +333,10 @@ class VtableObject :
 			raise	RttiError("Not a Vtable Object" )
 			
 		self.addr								= vtable_addr
-		self.Address_CompleteObjectLocator		= Deref(self.addr - 4)
+		if g_Is64bit :
+			self.Address_CompleteObjectLocator		= ReadPointer(self.addr - 8)
+		else :
+			self.Address_CompleteObjectLocator		= ReadPointer(self.addr - 4)
 		
 		if not self.IsValid() :
 			raise	RttiError("Not a Vtable Object" )
@@ -458,23 +509,54 @@ def GetMovInstructions(instructions) :
 def RegisterAllVtables() :
 	rtti_logger.debug("--- RegisterAllVtables [STARTED]")
 	# foreach functions in the database
-	functions = GetFunctions()
+	# functions = GetFunctions()
 	listClass = []
-	sys.stdout.write('rtti scanning .')
-	for funcea in functions:
-		sys.stdout.write('.')
+	sys.stdout.write('----------------- rtti scanner -----------------\n')
+	#for funcea in functions:
+	current_segment = FirstSeg()
+	while current_segment != BADADDR :
+		percent = 0
+		old_percent = -1
+		segment_start = SegStart(current_segment)
+		segment_end   = SegEnd(current_segment)
+		segment_name  = SegName(current_segment)
+		
+		# skip current segment if we dot not want do scan code segment
+		if not g_deep_scan :	
+			seg = idaapi.getseg(segment_start)
+			if seg.type == SEG_CODE :
+				rtti_logger.debug("--- skip segment %s (attr: %x)" % (segment_name, seg.type))
+				current_segment = NextSeg(current_segment)
+				continue
+				
+		sys.stdout.write("[+] Scan segment : %s (%08X to %08X) : " % (segment_name, segment_start, segment_end - g_pointer_size))
+		vtable_address = current_segment
+		while vtable_address < (segment_end - g_pointer_size) :
+			#sys.stdout.write('.')
 		# for each instructions in function
-		for curentInstructionAddress in GetMovInstructions(GetFunctionInstructions(funcea)):
-			vtable_address = GetOperandValue(curentInstructionAddress, 1)
-			rtti_logger.debug("try instruction : %s at 0x%08X" % (GetDisasm(curentInstructionAddress), curentInstructionAddress))
+		# for curentInstructionAddress in GetMovInstructions(GetFunctionInstructions(funcea)):
+		# vtable_address = GetOperandValue(curentInstructionAddress, 1)
+			rtti_logger.debug("try data at : 0x%08X" % (vtable_address))
 			try:
 				Vtable = VtableObject(vtable_address)				
 				Vtable.RegisterAllRttiObjects()
-				rtti_logger.debug("instruction : %s match" % (GetDisasm(curentInstructionAddress)))
+				rtti_logger.debug("data : %08X match" % (vtable_address))
 			except RttiError:
-				rtti_logger.debug("instruction : %s not match" % (GetDisasm(curentInstructionAddress)))
+				pass
+				#rtti_logger.debug("data : %08X not match" % (vtable_address))
+
+			vtable_address += 4
+			percent = int(((vtable_address - segment_start) * 100) / (segment_end - segment_start))
+			if percent != old_percent :
+				old_percent = percent
+				sys.stdout.write(".")
+
+		current_segment = NextSeg(current_segment)
+		sys.stdout.write ('\n')
+		
 	sys.stdout.write('[OK]\n')
 	rtti_logger.debug("--- RegisterAllVtables [FINISHED]")
+	RttiHelp()
 
 #_______________________________________________________________________________
 
@@ -591,7 +673,7 @@ def BuildClassFromVtables():
 
 def CreateStruct(name):
 	structId = GetStrucIdByName(name)
-	if structId != -1:
+	if structId != BADADDR:
 		DelStruc(structId)
 	
 	return AddStrucEx(-1, name, 0)
@@ -600,20 +682,30 @@ def CreateStruct(name):
 #_______________________________________________________________________________		
 def RttiCreateIdaStruct():
 	sid = CreateStruct("RTTI_TypeInformation")
-	AddStrucMember(sid, "pVFTable", 0, FF_DWRD|FF_DATA, -1, 4)
-	SetType(sid, "PVOID;")
-	AddStrucMember(sid, "spare", 4, FF_ALIGN|FF_DATA, -1, 4)
-	SetType(sid+4, "PVOID;")
-	AddStrucMember(sid, "Name", 8, FF_ASCI|FF_DATA, ASCSTR_C, 1)
+	if g_Is64bit :
+		AddStrucMember(sid, "pVFTable", 0, FF_QWRD|FF_DATA, BADADDR, 4)
+		SetType(sid, "PVOID;")
+		AddStrucMember(sid, "spare", 8, FF_QWRD|FF_DATA, BADADDR, 4)
+		SetType(sid+4, "PVOID;")
+		AddStrucMember(sid, "Name", 16, FF_ASCI|FF_DATA, ASCSTR_C, 1)
+	else :
+		AddStrucMember(sid, "pVFTable", 0, FF_DWRD|FF_DATA, BADADDR, 4)
+		SetType(sid, "PVOID;")
+		AddStrucMember(sid, "spare", 4, FF_ALIGN|FF_DATA, BADADDR, 4)
+		SetType(sid+4, "PVOID;")
+		AddStrucMember(sid, "Name", 8, FF_ASCI|FF_DATA, ASCSTR_C, 1)
 
 	sid = CreateStruct("RTTI_ClassHierarchyDescriptor")
-	AddStrucMember(sid, "signature", 0, FF_DWRD|FF_DATA, -1, 4)
+	AddStrucMember(sid, "signature", 0, FF_DWRD|FF_DATA, BADADDR, 4)
 	SetType(sid, "DWORD;")
-	AddStrucMember(sid, "Attributes", 4, FF_DWRD|FF_DATA, -1, 4)
+	AddStrucMember(sid, "Attributes", 4, FF_DWRD|FF_DATA, BADADDR, 4)
 	SetType(sid+4, "DWORD;")
-	AddStrucMember(sid, "numBaseClasses", 8, FF_DWRD|FF_DATA, -1, 4)
+	AddStrucMember(sid, "numBaseClasses", 8, FF_DWRD|FF_DATA, BADADDR, 4)
 	SetType(sid+8, "DWORD;")
-	AddStrucMember(sid, "BaseClassArray", 12, offflag()|FF_DWRD, -1, 4)
+	if g_Is64bit :
+		AddStrucMember(sid, "BaseClassArray", 12, offflag()|FF_DWRD|FF_DATA, BADADDR, 4, BADADDR, 0, REFINFO_RVA|REF_OFF64)
+	else :
+		AddStrucMember(sid, "BaseClassArray", 12, offflag()|FF_DWRD|FF_DATA, BADADDR, 4, BADADDR)
 	
 	
 	sid = CreateStruct("RTTI_CompleteObjectLocator")
@@ -623,11 +715,16 @@ def RttiCreateIdaStruct():
 	SetType(sid+4, "DWORD;")
 	AddStrucMember(sid, "cdOffset", 8, FF_DWRD|FF_DATA, -1, 4)
 	SetType(sid+8, "DWORD;")
-	AddStrucMember(sid, "TypeDescriptor", 12, offflag()|FF_DWRD|FF_DATA, -1, 4)
-	SetType(sid+12, "RTTI_TypeInformation*;")
-	AddStrucMember(sid, "ClassHierarchyDescriptor", 16, offflag()|FF_DWRD|FF_DATA, -1, 4)
-	SetType(sid+16, "RTTI_ClassHierarchyDescriptor*;")
+	if g_Is64bit :
+		AddStrucMember(sid, "TypeDescriptor", 12, offflag()|FF_DWRD|FF_DATA, BADADDR, 4, BADADDR, 0, REFINFO_RVA|REF_OFF64)
+		AddStrucMember(sid, "ClassHierarchyDescriptor", 16, offflag()|FF_DWRD|FF_DATA, BADADDR, 4, BADADDR, 0, REFINFO_RVA|REF_OFF64)
+	else :
+		AddStrucMember(sid, "TypeDescriptor", 12, offflag()|FF_DWRD|FF_DATA, -1, 4)
+		AddStrucMember(sid, "ClassHierarchyDescriptor", 16, offflag()|FF_DWRD|FF_DATA, -1, 4)
 
+	SetType(sid+12, "RTTI_TypeInformation*;")
+	SetType(sid+16, "RTTI_ClassHierarchyDescriptor*;")
+		
 	sid = CreateStruct("RTTI_PMD")
 	AddStrucMember(sid, "mdisp", 0, FF_DWRD|FF_DATA, -1, 4)
 	SetType(sid+0, "DWORD;")
@@ -637,7 +734,10 @@ def RttiCreateIdaStruct():
 	SetType(sid+8, "DWORD;")
 	
 	sid = CreateStruct("RTTI_BaseClassDescriptor")
-	AddStrucMember(sid, "TypeDescriptor", 0, offflag()|FF_DWRD|FF_DATA, -1, 4)
+	if g_Is64bit :
+		AddStrucMember(sid, "TypeDescriptor", 0, offflag()|FF_DWRD|FF_DATA, -1, 4, BADADDR, 0, REFINFO_RVA|REF_OFF64)
+	else:
+		AddStrucMember(sid, "TypeDescriptor", 0, offflag()|FF_DWRD|FF_DATA, -1, 4)
 	SetType(sid, "RTTI_TypeInformation* TypeDescriptor;")
 	AddStrucMember(sid, "numContainedBases", 4, FF_DWRD|FF_DATA, -1, 4)
 	SetType(sid+4, "DWORD;")
@@ -645,7 +745,11 @@ def RttiCreateIdaStruct():
 	SetType(sid+8, "RTTI_PMD;")
 	AddStrucMember(sid, "Attributes", 20, FF_DWRD|FF_DATA, -1, 4)
 	SetType(sid+20, "DWORD;")
-	AddStrucMember(sid, "ClassHierarchyDescriptor", 24, offflag()|FF_DWRD|FF_DATA, -1, 4)
+	if g_Is64bit :
+		AddStrucMember(sid, "ClassHierarchyDescriptor", 24, offflag()|FF_DWRD|FF_DATA, -1, 4, BADADDR, 0, REFINFO_RVA|REF_OFF64)
+	else:
+		AddStrucMember(sid, "ClassHierarchyDescriptor", 24, offflag()|FF_DWRD|FF_DATA, -1, 4)
+	
 	SetType(sid+24, "RTTI_ClassHierarchyDescriptor*;")
 	
 	SetType(GetStrucIdByName("RTTI_ClassHierarchyDescriptor")+12, "RTTI_BaseClassDescriptor**;")
@@ -665,13 +769,32 @@ def RttiRenameIdaField() :
 			ListCref += [ref]
 			ref = get_next_dref_to(address, ref)
 			
-		if  len(ListCref) == 2 :
-			MakeNameEx(get_func(ListCref[0]).startEA, "class_%s_ctor_dtor" % (class_.GetClassName()), SN_NOWARN)
-			MakeNameEx(get_func(ListCref[1]).startEA, "class_%s_ctor_dtor_" % (class_.GetClassName()), SN_NOWARN)
+		if  len(ListCref) >= 1 :
+			rtti_logger.debug("Create Constructor for class : %s" % (class_.GetClassName()))
+			
+			ctor_ = get_func(ListCref[0])
+			
+			if ctor_ :
+				MakeNameEx(get_func(ListCref[0]).startEA, "class_%s_ctor_dtor" % (class_.GetClassName()), SN_NOWARN)
+			else :
+				print "[+] You must create a function 'class_%s_ctor_dtor' at offset : %08X" % (class_.GetClassName(), ListCref[0])
+				
+		if  len(ListCref) >= 2 :
+			dtor_ = get_func(ListCref[1])
+			if dtor_ : 
+				MakeNameEx(get_func(ListCref[1]).startEA, "class_%s_ctor_dtor_" % (class_.GetClassName()), SN_NOWARN)
+			else:
+				print "[+] You must create a function 'class_%s_ctor_dtor_' at offset : %08X" % (class_.GetClassName(), ListCref[1])
+				
 	
 	for addr, vtable in Map_Vtable.items() :
-		MakeDword(addr)
-		MakeDword(addr-4)
+		if g_Is64bit :
+			MakeQword(addr)
+			MakeQword(addr-8)
+		else :
+			MakeDword(addr)
+			MakeDword(addr-4)
+			
 		ClassName = vtable.GetClassName()
 		ParentClassName = Map_Class[ClassName].GetBaseClassAtOffset(vtable.GetOffset())
 			
@@ -897,7 +1020,7 @@ def RttiHelp() :
 	print "RttiSaveClass()        : Save the class hierarchy in a .gml file"
 	print "RttiGetInfo()          : Print all the classes"
 	print "RttiGetClassInfo(name) : print the class hierarchy"
-	print "RttiRenameIdaField     : Rename the rtti structures in the ida database"
+	print "RttiRenameIdaField()   : Rename the rtti structures in the ida database"
 	
 	
 def main() :
@@ -910,6 +1033,8 @@ def main() :
 	global Map_Vtable
 	global Map_Class
 	global Map_VbTable
+	global g_Is64bit
+	global g_pointer_size
 
 	if rtti_logger == 0 :
 		if os.path.isfile(RttiLogFile) :
@@ -934,4 +1059,12 @@ def main() :
 	
 	
 if __name__ == "__main__" :
+	
+	if AskYN(0, "Include code section in the scan ?\n(this is slower)") == 1:
+		g_deep_scan = True
+	
+	# if the binary is a 64 bit one : 
+	if GetLongPrm(INF_LFLAGS) & LFLG_64BIT : 
+		g_Is64bit		= True
+		g_pointer_size	= 8
 	main()

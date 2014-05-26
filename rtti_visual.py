@@ -65,10 +65,17 @@ def ReadRva(addr):
 	return Dword(addr) + get_imagebase()
 	
 #_______________________________________________________________________________
-def IsDataSegment(addr) :
-	""" return True if addr is in a data segment """
+def IsValidAddress(addr) :
+	""" return True if addr is a valid address (in the database) """
 	try:
-		return GetSegmentAttr(addr, SEGATTR_TYPE) == SEG_DATA
+		if GetSegmentAttr(addr, SEGATTR_TYPE) == SEG_DATA :
+			return True
+			
+		if GetSegmentAttr(addr, SEGATTR_TYPE) == SEG_CODE and g_deep_scan :
+			return True
+			
+		return False
+		
 	except:
 		return False
 
@@ -84,7 +91,7 @@ class RttiError(Exception):
 class BaseClassDescritorObject:
 	def __init__(self, addr) :
 		rtti_logger.debug("try to build BaseClassDescritor Object at '%x'" % (addr))
-		if not IsDataSegment(addr) :
+		if not IsValidAddress(addr) :
 			raise	RttiError("Not a BaseClassDescritor")
 		
 		if g_Is64bit :
@@ -102,6 +109,12 @@ class BaseClassDescritorObject:
 			self.Attributes							= ReadUint32(addr +  20)
 			self.Address_ClassHierarchyDescriptor	= ReadPointer(addr +  24)
 	
+		if not IsValidAddress(self.Address_TypeDescriptor) or not IsValidAddress(self.Address_ClassHierarchyDescriptor):
+			raise RttiError ("Not a BaseClassDescritor")
+			
+		test_TypeDescriptor = TypeDescriptorObject(self.Address_TypeDescriptor)
+		test_ClassHierarchyDescriptor = ClassHierarchyDescriptorObject(self.Address_ClassHierarchyDescriptor)
+	
 	def __str__(self):
 		str = "BaseClassDescritorObject(%x - %s)\n" % (self.addr, self.GetClassName());
 		str += "\tTypeDescriptor          : %8x\n" % self.Address_TypeDescriptor;
@@ -114,6 +127,7 @@ class BaseClassDescritorObject:
 	def GetTypeDescriptor(self):
 		if not (self.Address_TypeDescriptor in Map_TypeDescriptor) :
 			Map_TypeDescriptor[self.Address_TypeDescriptor] = TypeDescriptorObject(self.Address_TypeDescriptor)
+			rtti_logger.debug("add  addr '%08X' to Map_TypeDescriptor" % (self.Address_TypeDescriptor))	
 			
 		return Map_TypeDescriptor[self.Address_TypeDescriptor]	
 		
@@ -158,7 +172,7 @@ class BaseClassDescritorObject:
 class ClassHierarchyDescriptorObject:
 	def __init__(self, addr, name = "") :
 		rtti_logger.debug("try to build ClassHierarchyDescriptor Object at '%x'" % (addr))
-		if not IsDataSegment(addr) :
+		if not IsValidAddress(addr) :
 			raise	RttiError("Not a ClassHierarchyDescriptor Object")
 			
 		self.addr								=	addr
@@ -173,7 +187,14 @@ class ClassHierarchyDescriptorObject:
 		self.Name								=	name
 		
 		if (self.Signature != 0):
-			raise	RttiError("Not a ClassHierarchyDescriptor Object" ) 
+			raise	RttiError("Not a ClassHierarchyDescriptor Object" )
+		
+		
+		if not IsValidAddress(self.Address_BaseClassDescriptorArray):
+			raise	RttiError("Not a ClassHierarchyDescriptor" )
+		
+		# test if each entry is valid
+		self.GetBaseClassDescriptorArray()
 		
 	def GetBaseClassDescriptorArray(self) :
 		Array = []
@@ -183,6 +204,9 @@ class ClassHierarchyDescriptorObject:
 			else:
 				BaseClassDescriptorAddress = ReadPointer(self.Address_BaseClassDescriptorArray + 4*i)
 			# strange, but some times there are duplicate values
+			if not IsValidAddress(BaseClassDescriptorAddress):
+				raise RttiError("BaseClassDescriptorAddress : invalid address")
+			
 			if BaseClassDescriptorAddress not in Array :
 				Array += [BaseClassDescriptorAddress]
 			
@@ -227,10 +251,14 @@ def MyGetString(addr):
 class TypeDescriptorObject:
 	def __init__(self, addr) :
 		rtti_logger.debug("try to build TypeDescriptor Object at '%x'" % (addr))
-		if not IsDataSegment(addr) :
+		if not IsValidAddress(addr) :
 			raise	RttiError("Not a TypeDescriptor at address : %x" % (addr) )
 		self.addr			= addr
 		self.pVFTable		= ReadPointer (addr + 0)
+		
+		if not IsValidAddress(self.pVFTable):
+			raise	RttiError("Not a TypeDescriptor" )
+		
 		if g_Is64bit :
 			self.Name			= MyGetString(addr + 16)
 		else :
@@ -250,6 +278,7 @@ class TypeDescriptorObject:
 	def RegisterAllRttiObjects(self):
 		if self.addr not in Map_TypeDescriptor :
 			Map_TypeDescriptor[self.addr] = self
+			rtti_logger.debug("add  addr '%08X' to Map_TypeDescriptor" % (self.addr))
 			
 	def ExportToDot(self):
 		label	 = 	"<start>TypeDescriptorObject"
@@ -263,7 +292,7 @@ class TypeDescriptorObject:
 class CompleteObjectLocatorObject :	
 	def __init__(self, addr) :
 		rtti_logger.debug("try to build CompleteObjectLocator Object at '%x'" % (addr))
-		if not IsDataSegment(addr) :
+		if not IsValidAddress(addr) :
 			raise	RttiError("Not a CompleteObjectLocator Object" ) 
 		
 		self.addr								= addr
@@ -284,10 +313,19 @@ class CompleteObjectLocatorObject :
 		else :
 			if (self.signature != 0):
 				raise	RttiError("Not a CompleteObjectLocator Object" ) 
-				
+		
+		if not IsValidAddress(self.Address_TypeDescriptor) or not IsValidAddress(self.Address_ClassHierarchyDescriptor):
+			raise	RttiError("Not a CompleteObjectLocator Object" )
+		
+		
+		test_TypeDescriptor = TypeDescriptorObject(self.Address_TypeDescriptor)
+		test_ClassHierarchyDescriptorObject = ClassHierarchyDescriptorObject(self.Address_ClassHierarchyDescriptor)
+		
+		
 	def GetTypeDescriptor(self) :
 		if self.Address_TypeDescriptor not in Map_TypeDescriptor :
 			Map_TypeDescriptor[self.Address_TypeDescriptor] = TypeDescriptorObject(self.Address_TypeDescriptor)
+			rtti_logger.debug("add  addr '%08X' to Map_TypeDescriptor" % (self.Address_TypeDescriptor))
 			
 		return Map_TypeDescriptor[self.Address_TypeDescriptor]
 	
@@ -301,11 +339,12 @@ class CompleteObjectLocatorObject :
 		return self.Offset
 	
 	def GetClassName(self) :
-		TypeDescriptor = self.GetTypeDescriptor()
+		TypeDescriptor = TypeDescriptorObject(self.Address_TypeDescriptor)
 		return TypeDescriptor.GetClassName()
 			
 	def RegisterAllRttiObjects(self):
 		if self.addr not in Map_CompleteObjectLocator :
+			rtti_logger.debug("add complete object locator at addr %08X" % (self.addr))
 			Map_CompleteObjectLocator[self.addr] = self
 			
 		TypeDescriptor				= self.GetTypeDescriptor()
@@ -329,7 +368,7 @@ class CompleteObjectLocatorObject :
 class VtableObject :
 	def __init__(self, vtable_addr):
 		rtti_logger.debug("try to build Vtable object at '%x'" % (vtable_addr))
-		if not IsDataSegment(vtable_addr) :
+		if not IsValidAddress(vtable_addr) :
 			raise	RttiError("Not a Vtable Object" )
 			
 		self.addr								= vtable_addr
@@ -340,8 +379,13 @@ class VtableObject :
 		
 		if not self.IsValid() :
 			raise	RttiError("Not a Vtable Object" )
-			
-		rtti_logger.debug("Found vtable of class %s at offset %x\n" % (self.GetClassName(), self.GetCompleteObjectLocator().Offset))
+		
+		if not IsValidAddress(self.Address_CompleteObjectLocator):
+			raise	RttiError("Not a Vtable Object" )
+		
+		test_CompleteObjectLocator = CompleteObjectLocatorObject(self.Address_CompleteObjectLocator)
+		
+		rtti_logger.debug("Found vtable of class %s at offset %x\n" % (test_CompleteObjectLocator.GetClassName(), self.GetCompleteObjectLocator().Offset))
 							
 	def GetCompleteObjectLocator(self) :
 		if self.Address_CompleteObjectLocator not in Map_CompleteObjectLocator :
@@ -372,6 +416,8 @@ class VtableObject :
 	
 	def RegisterAllRttiObjects(self):
 		if self.addr not in Map_Vtable :
+			
+			rtti_logger.debug("add vtable at addr %08X with complete_obj_loc at %08X" % (self.addr, self.Address_CompleteObjectLocator))				
 			Map_Vtable[self.addr] = self
 						
 			CompleteObjectLocator = self.GetCompleteObjectLocator()
@@ -538,7 +584,7 @@ def RegisterAllVtables() :
 		# vtable_address = GetOperandValue(curentInstructionAddress, 1)
 			rtti_logger.debug("try data at : 0x%08X" % (vtable_address))
 			try:
-				Vtable = VtableObject(vtable_address)				
+				Vtable = VtableObject(vtable_address)	
 				Vtable.RegisterAllRttiObjects()
 				rtti_logger.debug("data : %08X match" % (vtable_address))
 			except RttiError:
@@ -642,7 +688,7 @@ def BuildClassFromVtables():
 			mov_instr += GetMovInstructions(GetFunctionInstructions(get_func(ListCref[1]).startEA))
 			
 			for instr in mov_instr :
-				if GetOperandValue(instr, 1) not in Map_Vtable and IsDataSegment(GetOperandValue(instr, 1)) and GetOperandValue(instr, 0) != 0:
+				if GetOperandValue(instr, 1) not in Map_Vtable and IsValidAddress(GetOperandValue(instr, 1)) and GetOperandValue(instr, 0) != 0:
 					OffsetUsed[GetOperandValue(instr, 0)] = instr
 
 		ListClassDescriptor = Class.GetBaseClassDescriptorArray()
@@ -1056,11 +1102,12 @@ def main() :
 	# find all vtables
 	RegisterAllVtables()
 	BuildClassFromVtables()
+	RttiGetInfo()
 	
 	
 if __name__ == "__main__" :
 	
-	if AskYN(0, "Include code section in the scan ?\n(this is slower)") == 1:
+	if AskYN(0, "Include code section in the scan ?\n(in very few cases, rtti data are in the code section)") == 1:
 		g_deep_scan = True
 	
 	# if the binary is a 64 bit one : 
